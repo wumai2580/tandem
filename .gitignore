@@ -18,3 +18,4 @@ pair-qr.png
 logcat.txt
 *.log
 .gh-token
+reverse/

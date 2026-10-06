@@ -2,8 +2,9 @@
 
 Protocol (independently implemented from the public wire format):
   1. BLE advertise service 00003331-0000-1000-8000-008123456789 with
-     service-data segments 0x01ff (6B random) and 0xffff (8B + 2B rand +
-     16B name + 0x01). Local name = our device name.
+     service-data 0x1b1e (2B session id + 4B zeros); the name rides in a
+     0xffff service-data blob: 8x00 + 2B id + name[16] + 0x01
+     (bytes captured from a real Xiaomi 17 Pro).
   2. Phone connects to GATT service 00009955-...:
        0x9954 read  -> {"state":0,"mac":"..","key":"<b64 SPKI P-256 pubkey>"}
        0x9953 write -> {"ssid","psk","mac","port","key"?:<sender pubkey>}
@@ -39,7 +40,7 @@ ADV_UUID = uuid.UUID("00003331-0000-1000-8000-008123456789")
 SERVICE_UUID = uuid.UUID("00009955-0000-1000-8000-00805f9b34fb")
 CHAR_STATUS = uuid.UUID("00009954-0000-1000-8000-00805f9b34fb")
 CHAR_P2P = uuid.UUID("00009953-0000-1000-8000-00805f9b34fb")
-SD_UUID_1 = uuid.UUID("000001ff-0000-1000-8000-00805f9b34fb")
+SD_UUID_1 = uuid.UUID("00001b1e-0000-1000-8000-00805f9b34fb")
 SD_UUID_2 = uuid.UUID("0000ffff-0000-1000-8000-00805f9b34fb")
 
 AES_IV = b"0102030405060708"
@@ -113,6 +114,7 @@ class MtaGattServer:
         self.crypto = MtaCrypto()
         self._provider = None
         self._beacon = None
+        self._namebeacon = None
         self.ok = False
         self.error: str | None = None
 
@@ -210,36 +212,82 @@ class MtaGattServer:
 
         p2p_char.add_write_requested(on_write)
 
-        # Two providers, two simultaneous advertisements:
-        #  A) empty service with UUID 0x3331 — what MTA phones scan for
-        #     (BluetoothLEAdvertisementPublisher is denied on this hardware, and
-        #     a GATT provider always advertises its own service UUID, so an
-        #     empty provider doubles as our beacon)
-        #  B) the real GATT service 0x9955 — reachable via service discovery
-        #     once the phone connects to the address from A's advert.
+        # Advert layout copied from a real Xiaomi MTA packet capture:
+        #   ADV:      Flags | 0x07 incomplete-UUID128 0x3331
+        #                    | 0x16 service-data 0x1b1e <rand16><4x00>
+        #   SCAN_RSP: 0x16 service-data 0xffff <8x00><rand16><name16><0x01>
+        # Windows can't put UUIDs in a publisher advert (ACCESS_DENIED) and
+        # GATT-provider adverts can't carry service data — so we run three
+        # adverts from the same radio address and let the phone's scanner
+        # merge them into one ScanResult:
+        #   beacon(0x3331, connectable) + publisher(0x1b1e) + publisher(0xffff)
+        from winrt.windows.devices.bluetooth.advertisement import (
+            BluetoothLEAdvertisement,
+            BluetoothLEAdvertisementDataSection,
+            BluetoothLEAdvertisementPublisher,
+        )
         from winrt.windows.devices.bluetooth.genericattributeprofile import (
             GattServiceProviderAdvertisingParameters,
         )
 
+        rand16 = os.urandom(2)
+        name16 = self.name.encode("utf-8")[:15]
+
+        def sd_section(uuid16: int, payload: bytes):
+            w = DataWriter()
+            w.write_uint16(uuid16)
+            w.write_bytes(payload)
+            s = BluetoothLEAdvertisementDataSection()
+            s.data_type = 0x16
+            s.data = w.detach_buffer()
+            return s
+
+        def pub_for(*sections):
+            adv = BluetoothLEAdvertisement()
+            for s in sections:
+                adv.data_sections.append(s)
+            p = BluetoothLEAdvertisementPublisher(adv)
+            p.start()
+            return p
+
+        # 0x1b1e session-id data (matches real phone) + 0xffff name blob
+        self._sdpub = pub_for(sd_section(0x1B1E, rand16 + b"\x00" * 4))
+        self._namepub = pub_for(
+            sd_section(0xFFFF, b"\x00" * 8 + rand16 + name16 + b"\x01")
+        )
+
+        # NOTE: on MediaTek radios is_connectable+is_discoverable together
+        # abort the advert (status=ABORTED). Connectable alone still emits a
+        # scannable connectable PDU — keep discoverable off.
         res_a = _get(GattServiceProvider.create_async(ADV_UUID))
         self._beacon = getattr(res_a, "service_provider", res_a)
         ap_a = GattServiceProviderAdvertisingParameters()
-        ap_a.is_discoverable = True
         ap_a.is_connectable = True
         self._beacon.start_advertising_with_parameters(ap_a)
 
         ap = GattServiceProviderAdvertisingParameters()
-        ap.is_discoverable = True
         ap.is_connectable = True
         provider.start_advertising_with_parameters(ap)
+        import time as _t
+        _t.sleep(1)
+        print(
+            f"[mta] beacon status={self._beacon.advertisement_status} "
+            f"gatt status={provider.advertisement_status}",
+            flush=True,
+        )
         print(f"[mta] advertising as MTA receiver '{self.name}'", flush=True)
 
     def stop(self):
-        try:
-            self._provider and self._provider.stop_advertising()
-            self._beacon and self._beacon.stop_advertising()
-        except Exception:
-            pass
+        for a in ("_provider", "_beacon"):
+            try:
+                getattr(self, a) and getattr(self, a).stop_advertising()
+            except Exception:
+                pass
+        for a in ("_sdpub", "_namepub"):
+            try:
+                getattr(self, a, None) and getattr(self, a).stop()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------- Wi-Fi -----

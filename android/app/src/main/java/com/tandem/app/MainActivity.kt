@@ -96,6 +96,7 @@ class MainActivity : AppCompatActivity() {
             if (ensureBlePerms()) runBench(i.getBooleanExtra("fast", false))
         }
         if (i.getBooleanExtra("mtaScan", false) && ensureBlePerms()) runMtaScan()
+        if (i.getBooleanExtra("pcScan", false) && ensureBlePerms()) runPcScan()
     }
 
     private fun refresh() {
@@ -194,6 +195,34 @@ class MainActivity : AppCompatActivity() {
             Thread.sleep(10000)
             sc.stopScan(cb)
             runOnUiThread { if (found.isEmpty()) status.text = "未发现 0x3331 信标" }
+        }
+    }
+
+    /** Debug: dump all Xiaomi mfr-911 adverts seen by the phone. */
+    private fun runPcScan() {
+        status.text = "扫描 mfr-911…"
+        thread {
+            val bt = (getSystemService(BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
+            val sc = bt.bluetoothLeScanner
+            val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val cb = object : android.bluetooth.le.ScanCallback() {
+                override fun onScanResult(t: Int, r: android.bluetooth.le.ScanResult) {
+                    val m = r.scanRecord?.getManufacturerSpecificData(911) ?: return
+                    val s = "${r.device.address} rssi=${r.rssi} ${m.joinToString("") { "%02x".format(it) }}"
+                    if (seen.addIfAbsent(s)) {
+                        android.util.Log.i("TandemPcScan", s)
+                        runOnUiThread { status.text = "mfr911:\n" + seen.joinToString("\n") }
+                    }
+                }
+            }
+            sc.startScan(
+                null,
+                android.bluetooth.le.ScanSettings.Builder()
+                    .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                cb)
+            Thread.sleep(15000)
+            sc.stopScan(cb)
+            runOnUiThread { if (seen.isEmpty()) status.text = "未捕获 mfr-911 包" }
         }
     }
 
