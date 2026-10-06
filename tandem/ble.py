@@ -47,6 +47,7 @@ class BleBeacon:
         self._provider = None
         self.ok = False
         self.error: str | None = None
+        self._bench: dict | None = None  # {"t0": float, "bytes": int, "n": int}
 
     def start(self) -> None:
         if sys.platform != "win32":
@@ -121,22 +122,50 @@ class BleBeacon:
                     req.respond()
                     deferral.complete()
                     return
+                raw_len = getattr(val, "length", 0)  # IBuffer length
                 reader = DataReader.from_buffer(val)
                 data = json.loads(reader.read_string(reader.unconsumed_buffer_length))
+                # throughput probe: {"b":1,...} chunks accumulate; {"b":0} closes
+                b = data.get("b") if isinstance(data, dict) else None
+                if b is not None:
+                    import time
+                    now = time.time()
+                    if b == 1:
+                        if self._bench is None:
+                            self._bench = {"t0": now, "bytes": 0, "n": 0}
+                        self._bench["bytes"] += raw_len
+                        self._bench["n"] += 1
+                        if self._bench["n"] == 1 or self._bench["n"] % 25 == 0:
+                            print(
+                                f"[ble] bench chunk {self._bench['n']} "
+                                f"({self._bench['bytes']}B)",
+                                flush=True,
+                            )
+                    else:
+                        if self._bench:
+                            dur = now - self._bench["t0"]
+                            kb = self._bench["bytes"] / 1024
+                            rate = kb / dur if dur > 0 else 0
+                            print(
+                                f"[ble] bench: {self._bench['n']} writes, "
+                                f"{kb:.1f} KB in {dur:.2f}s -> {rate:.1f} KB/s",
+                                flush=True,
+                            )
+                            self._bench = None
+                    return
                 print(f"[ble] pair request: {data.get('n')} key={data.get('k')}", flush=True)
                 self._on_pair(str(data.get("n", "device"))[:64], str(data.get("k", ""))[:64])
-                try:
-                    req.respond()
-                except OSError:
-                    pass  # already committed by the stack
-                try:
-                    deferral.complete()
-                except OSError:
-                    pass
+                return
             except Exception as e:
                 print(f"[ble] write handler error: {e!r}", flush=True)
+            finally:
+                # WinRT auto-acks writes once the deferral completes; respond()
+                # after that throws "object already submitted" — ignore it.
                 try:
                     req.respond()
+                except Exception:
+                    pass
+                try:
                     deferral.complete()
                 except Exception:
                     pass

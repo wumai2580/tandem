@@ -83,6 +83,18 @@ class MainActivity : AppCompatActivity() {
         root.addView(devices)
         setContentView(root)
         refresh()
+        if (intent.getBooleanExtra("bench", false)) {
+            pendingAction = "bench"
+            if (ensureBlePerms()) runBench()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra("bench", false)) {
+            pendingAction = "bench"
+            if (ensureBlePerms()) runBench()
+        }
     }
 
     private fun refresh() {
@@ -123,13 +135,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var pendingAction = "pair"
+
     private val perms = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
-        if (granted.values.all { it }) blePair() else toast("需要蓝牙权限才能配对")
+        if (!granted.values.all { it }) return@registerForActivityResult toast("需要蓝牙权限")
+        if (pendingAction == "bench") runBench() else blePair()
     }
 
-    private fun blePair() {
+    private fun ensureBlePerms(): Boolean {
         val need = if (android.os.Build.VERSION.SDK_INT >= 31) listOf(
             android.Manifest.permission.BLUETOOTH_SCAN,
             android.Manifest.permission.BLUETOOTH_CONNECT,
@@ -137,7 +152,27 @@ class MainActivity : AppCompatActivity() {
         val missing = need.filter {
             checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isNotEmpty()) { perms.launch(missing.toTypedArray()); return }
+        if (missing.isNotEmpty()) { perms.launch(missing.toTypedArray()); return false }
+        return true
+    }
+
+    private fun runBench() {
+        status.text = "BLE 测速中…"
+        val fast = intent.getBooleanExtra("fast", false)
+        thread {
+            try {
+                kotlinx.coroutines.runBlocking {
+                    Ble.bench(this@MainActivity, 200, fast) { s -> runOnUiThread { status.text = s } }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { status.text = "测速失败：${e.message}" }
+            }
+        }
+    }
+
+    private fun blePair() {
+        pendingAction = "pair"
+        if (!ensureBlePerms()) return
 
         status.text = "蓝牙配对中…"
         thread {
