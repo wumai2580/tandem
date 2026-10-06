@@ -126,42 +126,67 @@ object Hub {
         return code == 401
     }
 
-    fun postText(ctx: Context, text: String) {
-        val ep = endpoint(ctx) ?: return
-        val conn = https(ctx, URL("https://${ep.host}:${ep.port}/api/text?token=${apiToken(ctx)}")).apply {
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-        }
-        val body = "text=" + java.net.URLEncoder.encode(text, "UTF-8") + "&origin=android"
-        conn.outputStream.use { it.write(body.toByteArray()) }
-        if (rejected(ctx, conn.responseCode)) error("凭证已被吊销，请重新配对")
+    /** Update the stored host/port after rediscovery; keeps token, CA and name. */
+    private fun updateEndpoint(ctx: Context, ep: Endpoint) {
+        prefs(ctx).edit().putString("host", ep.host).putInt("port", ep.port)
+            .putString("name", ep.name).apply()
     }
 
-    fun postFile(ctx: Context, uri: Uri) {
-        val ep = endpoint(ctx) ?: return
-        val token = apiToken(ctx)
-        val (name, size) = fileMeta(ctx, uri)
-        val boundary = "----tandem${System.nanoTime()}"
-        val conn = https(ctx, URL("https://${ep.host}:${ep.port}/api/files?token=$token")).apply {
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-            setChunkedStreamingMode(1 shl 20)
+    /**
+     * Run [block] against the stored endpoint; on a network-level failure,
+     * rediscover the hub via mDNS, update the endpoint and retry once.
+     */
+    private suspend fun <T> withEndpoint(ctx: Context, block: (Endpoint) -> T): T {
+        val ep = endpoint(ctx) ?: throw IllegalStateException("not paired")
+        try {
+            return block(ep)
+        } catch (e: java.io.IOException) {
+            val fresh = discover(ctx, 3000).firstOrNull() ?: throw e
+            updateEndpoint(ctx, fresh)
+            return block(fresh)
         }
-        conn.outputStream.use { out ->
-            out.write("--$boundary\r\n".toByteArray())
-            out.write(
-                "Content-Disposition: form-data; name=\"file\"; filename=\"${name}\"\r\n".toByteArray()
-            )
-            out.write("Content-Type: application/octet-stream\r\n\r\n".toByteArray())
-            ctx.contentResolver.openInputStream(uri)?.use { it.copyTo(out, 1 shl 20) }
-            out.write("\r\n--$boundary--\r\n".toByteArray())
-            out.flush()
+    }
+
+    fun postText(ctx: Context, text: String) = kotlinx.coroutines.runBlocking {
+        withEndpoint(ctx) { ep ->
+            val conn = https(ctx, URL("https://${ep.host}:${ep.port}/api/text?token=${apiToken(ctx)}")).apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            }
+            val body = "text=" + java.net.URLEncoder.encode(text, "UTF-8") + "&origin=android"
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val code = conn.responseCode
+            if (rejected(ctx, code)) error("凭证已被吊销，请重新配对")
+            if (code != 200) error("send failed: $code")
         }
-        val code = conn.responseCode
-        if (rejected(ctx, code)) error("凭证已被吊销，请重新配对")
-        if (code != 200) error("upload failed: $code")
+    }
+
+    fun postFile(ctx: Context, uri: Uri) = kotlinx.coroutines.runBlocking {
+        withEndpoint(ctx) { ep ->
+            val token = apiToken(ctx)
+            val (name, _) = fileMeta(ctx, uri)
+            val boundary = "----tandem${System.nanoTime()}"
+            val conn = https(ctx, URL("https://${ep.host}:${ep.port}/api/files?token=$token")).apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                setChunkedStreamingMode(1 shl 20)
+            }
+            conn.outputStream.use { out ->
+                out.write("--$boundary\r\n".toByteArray())
+                out.write(
+                    "Content-Disposition: form-data; name=\"file\"; filename=\"${name}\"\r\n".toByteArray()
+                )
+                out.write("Content-Type: application/octet-stream\r\n\r\n".toByteArray())
+                ctx.contentResolver.openInputStream(uri)?.use { it.copyTo(out, 1 shl 20) }
+                out.write("\r\n--$boundary--\r\n".toByteArray())
+                out.flush()
+            }
+            val code = conn.responseCode
+            if (rejected(ctx, code)) error("凭证已被吊销，请重新配对")
+            if (code != 200) error("upload failed: $code")
+        }
     }
 
     private fun fileMeta(ctx: Context, uri: Uri): Pair<String, Long> {
