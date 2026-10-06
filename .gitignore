@@ -17,3 +17,4 @@ android/app/build/
 pair-qr.png
 logcat.txt
 *.log
+.gh-token
