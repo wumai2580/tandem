@@ -1,0 +1,27 @@
+[project]
+name = "tandem-link"
+version = "0.1.0"
+description = "AirDrop for every device — share files, clipboard and links between Android, iOS, Windows, macOS and Linux. Nothing to install on your phone."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pyperclip>=1.9",
+    "qrcode[pil]>=7.4",
+    "platformdirs>=4.2",
+    "cryptography>=43",
+    "zeroconf>=0.132",
+]
+
+[project.scripts]
+tandem = "tandem.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tandem"]

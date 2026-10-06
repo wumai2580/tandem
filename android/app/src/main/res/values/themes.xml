@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0B1020</color>
+    <color name="accent">#6366F1</color>
+    <color name="text">#E8ECF6</color>
+
+    <style name="Theme.Tandem" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:textColor">@color/text</item>
+    </style>
+
+    <style name="Theme.Tandem.Dialog" parent="Theme.AppCompat.Dialog">
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:windowIsTranslucent">true</item>
+    </style>
+</resources>
