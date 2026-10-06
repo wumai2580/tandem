@@ -2,10 +2,8 @@ package com.tandem.app
 
 import android.content.Intent
 import android.os.Bundle
-import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,18 +81,21 @@ class MainActivity : AppCompatActivity() {
         root.addView(devices)
         setContentView(root)
         refresh()
-        if (intent.getBooleanExtra("bench", false)) {
-            pendingAction = "bench"
-            if (ensureBlePerms()) runBench()
-        }
+        handleExtras(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent.getBooleanExtra("bench", false)) {
+        handleExtras(intent)
+    }
+
+    /** adb hooks: --ez bench true [--ez fast true], --ez mtaScan true */
+    private fun handleExtras(i: Intent) {
+        if (i.getBooleanExtra("bench", false)) {
             pendingAction = "bench"
-            if (ensureBlePerms()) runBench()
+            if (ensureBlePerms()) runBench(i.getBooleanExtra("fast", false))
         }
+        if (i.getBooleanExtra("mtaScan", false) && ensureBlePerms()) runMtaScan()
     }
 
     private fun refresh() {
@@ -156,9 +157,8 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
-    private fun runBench() {
+    private fun runBench(fast: Boolean = false) {
         status.text = "BLE 测速中…"
-        val fast = intent.getBooleanExtra("fast", false)
         thread {
             try {
                 kotlinx.coroutines.runBlocking {
@@ -167,6 +167,33 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 runOnUiThread { status.text = "测速失败：${e.message}" }
             }
+        }
+    }
+
+    /** Debug: scan for MTA (互传联盟) 0x3331 beacons to verify mta.py is on air. */
+    private fun runMtaScan() {
+        status.text = "扫描 0x3331 信标…"
+        thread {
+            val bt = (getSystemService(BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
+            val sc = bt.bluetoothLeScanner
+            val mta = android.os.ParcelUuid(
+                java.util.UUID.fromString("00003331-0000-1000-8000-008123456789"))
+            val found = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val cb = object : android.bluetooth.le.ScanCallback() {
+                override fun onScanResult(t: Int, r: android.bluetooth.le.ScanResult) {
+                    val s = "${r.device.address} rssi=${r.rssi}"
+                    if (found.addIfAbsent(s))
+                        runOnUiThread { status.text = "发现:\n" + found.joinToString("\n") }
+                }
+            }
+            sc.startScan(
+                listOf(android.bluetooth.le.ScanFilter.Builder().setServiceUuid(mta).build()),
+                android.bluetooth.le.ScanSettings.Builder()
+                    .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                cb)
+            Thread.sleep(10000)
+            sc.stopScan(cb)
+            runOnUiThread { if (found.isEmpty()) status.text = "未发现 0x3331 信标" }
         }
     }
 
