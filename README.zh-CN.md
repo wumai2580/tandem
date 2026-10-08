@@ -86,6 +86,15 @@ tandem
 一分钟建个 *Tandem* 快捷指令，接收任意内容 POST 到中枢，就进 iOS 分享表单了。
 手把手教程：[docs/ios-shortcut.md](docs/ios-shortcut.md)
 
+### 小米 / HyperOS：原生「互传」
+
+跑 `python -m tandem.mtapc`，这台电脑就会**以"笔记本"身份出现在小米互传的设备列表里**——不用装任何 App，也不需要小米笔记本。
+
+- 互传里点选这台电脑 → 手机照常拉起临时热点 → Tandem 自动入网、HTTPS 拉文件、**完事把 Wi-Fi 还给你**，全程几秒钟
+- 协议逆向自 HyperOS：BLE 厂商数据协商 → 临时 `ap_mishare_*` 热点 → NanoHTTPD 拉取
+- ✅ 已实测打通：手机 → 电脑（HyperOS 3）
+- 🚧 还没做：电脑 → 手机反向，以及跨厂商 MTA 联盟通道——见 [Roadmap](#roadmap)
+
 ## 🔧 原理
 
 ```
@@ -104,7 +113,9 @@ tandem
 
 ## 🗺️ Roadmap
 
-- [ ] MTA 互传联盟接收端——让电脑原生出现在「小米互传」菜单里（BLE 通道已验证可行）
+- [x] 小米互传接收端——电脑原生出现在互传分享菜单（手机→电脑已实测）
+- [ ] 小米互传发送端——电脑 → 手机
+- [ ] MTA 联盟 GATT/ECDH 通道——OPPO/vivo 互传菜单
 - [ ] iPhone ↔ 中枢快捷指令深度集成
 - [ ] PC ↔ PC 互传
 - [ ] 图片剪贴板同步

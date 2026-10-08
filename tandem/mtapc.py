@@ -112,7 +112,8 @@ def build_response(our_dev_id: int, sender_dev_id: int, task_id: int,
 
 def parse_tlv(payload: bytes):
     """Walk the TLV stream of a mfr-911 payload; return dict of finds."""
-    out = {"name": None, "dev_id": None, "app0": None, "ok": False}
+    out = {"name": None, "dev_id": None, "app0": None,
+           "app15": None, "ok": False}
     if len(payload) < 6 or payload[1] != 0x11 or payload[3] != 0x11:
         return out
     if payload[4] not in (0x12, 0x02):
@@ -145,7 +146,12 @@ def parse_tlv(payload: bytes):
             else:
                 break
         elif t == 15:
-            i += 1
+            ln = (tag >> 4) & 15
+            if i + 1 + ln <= len(payload):
+                out["app15"] = payload[i + 1:i + 1 + ln]
+                i += 1 + ln
+            else:
+                break
         else:
             break
     return out
@@ -170,16 +176,23 @@ def parse_offer(payload: bytes):
         "name": app0[9:].decode("utf-8", "replace"),
         "ip": None,
     }
-    # trailing [0x2F, ip2, ip3]
-    i = payload.rfind(b"\x2f")
-    if 0 < i + 2 < len(payload) + 1 and i + 2 <= len(payload) - 1:
-        o["ip"] = f"192.168.{payload[i + 1]}.{payload[i + 2]}"
+    # type-15 TLV = server ip tail: 192.168.<a>.<b>
+    tail = tlv.get("app15")
+    if tail and len(tail) == 2:
+        o["ip"] = f"192.168.{tail[0]}.{tail[1]}"
     return o
 
 
 def _netsh(*args) -> str:
     return subprocess.run(["netsh"] + list(args), capture_output=True,
                           timeout=20).stdout.decode("gbk", "replace")
+
+
+def current_ssid() -> str:
+    """SSID we are currently associated with ("" if disconnected)."""
+    m = re.search(r"SSID\s*:\s*(.+)",
+                  _netsh("wlan", "show", "interfaces"))
+    return m.group(1).strip() if m else ""
 
 
 def _wlan_profile(ssid: str, psk: str, path: str) -> str:
@@ -209,7 +222,7 @@ def _wlan_profile(ssid: str, psk: str, path: str) -> str:
     return path
 
 
-def join_phone_ap(offer: dict, log=print, timeout: float = 25.0) -> str:
+def join_phone_ap(offer: dict, log=print, timeout: float = 30.0) -> str:
     sid = offer["sender_dev_id"]
     if sid is None:
         raise RuntimeError("offer missing sender device id")
@@ -226,20 +239,36 @@ def join_phone_ap(offer: dict, log=print, timeout: float = 25.0) -> str:
         os.unlink(path)
     except OSError:
         pass
-    _netsh("wlan", "connect", f"name={ssid}")
     t0 = time.time()
     while time.time() - t0 < timeout:
-        out = _netsh("wlan", "show", "interfaces")
-        # zh-CN: "状态 : 已连接" / en-US: "State : connected"
-        if ssid in out and ("connected" in out.lower() or "已连接" in out):
-            return ssid
-        time.sleep(1.0)
+        _netsh("wlan", "connect", f"name={ssid}")
+        for _ in range(10):
+            out = _netsh("wlan", "show", "interfaces")
+            # zh-CN: "状态 : 已连接" / en-US: "State : connected"
+            if ssid in out and ("connected" in out.lower() or "已连接" in out):
+                return ssid
+            time.sleep(0.6)
+        # phone may still be bringing its AP up — retry the connect
+        if time.time() - t0 < timeout:
+            log("[mtapc] AP not associated yet, retrying…")
     raise TimeoutError(f"failed to join {ssid}")
+
+
+def _safe_name(name: str) -> str:
+    """Strip characters illegal in Windows paths."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip() or "file"
 
 
 def pull_files(offer: dict, out_dir: Path, log=print,
                user: str = None) -> list:
-    """HTTPS pull from the phone's NanoHTTPD :9999."""
+    """HTTPS pull from the phone's NanoHTTPD :9999.
+
+    Mirrors the real receiver (pc/receive/d.java): fileinfo -> per-file
+    download with progress reports -> fileverify(md5) -> taskcomplete.
+    The taskcomplete response may carry "nexttaskid" for a queued batch —
+    loop until the phone has nothing left.
+    """
+    import hashlib
     import urllib.request
 
     ip = offer["ip"] or "192.168.43.1"
@@ -258,31 +287,78 @@ def pull_files(offer: dict, out_dir: Path, log=print,
 
     def post(path, body: dict):
         url = f"{base}/{path}"
-        log(f"[mtapc] POST {url} {body}")
+        if "report" not in path:  # progress posts every 2s would spam
+            log(f"[mtapc] POST {url} {body}")
         req = urllib.request.Request(
             url, data=json.dumps(body).encode(), method="POST",
             headers={"Content-Type": "application/json",
                      "Accept": "application/json", "Connection": "keep-alive"})
         return urllib.request.urlopen(req, context=ctx, timeout=15)
 
+    def report(task: str, data: dict):
+        try:
+            post(f"report?user={uid}&task={task}",
+                 {"status": 0, "data": data})
+        except Exception:
+            pass  # progress reporting is best-effort
+
+    saved = []
     # task id on the wire is the *decimal* string (p079n1.b.u = toString)
     task = str(offer["task_id"])
-    info = json.loads(get(f"fileinfo?user={uid}&task={task}").read().decode())
-    files = info.get("data") or []
-    saved = []
-    for fm in files:
-        fid, name = fm.get("id"), fm.get("name") or "file"
-        resp = get(f"file?user={uid}&task={task}&id={fid}")
-        data = resp.read()
-        out = out_dir / f"{offer['task_id']:04x}_{name.replace('/', '_')}"
-        out.write_bytes(data)
-        log(f"[mtapc] saved {out.name} ({len(data)}B)")
-        saved.append(out)
-    try:
-        post(f"taskcomplete?user={uid}&task={task}",
-             {"status": 0, "data": {}})
-    except Exception as e5:
-        log(f"[mtapc] taskcomplete err: {e5}")
+    while task:
+        info = json.loads(
+            get(f"fileinfo?user={uid}&task={task}").read().decode())
+        files = info.get("data") or []
+        if not files:
+            break
+        for fm in files:
+            fid = str(fm.get("id", ""))
+            name = _safe_name(fm.get("name") or "file")
+            total = int(fm.get("size") or 0)
+            report(task, {"code": 3, "id": fid, "dstname": name,
+                          "dstpath": str(out_dir)})
+            resp = get(f"file?user={uid}&task={task}&id={fid}")
+            out = out_dir / f"{offer['task_id']:04x}_{name}"
+            md5 = hashlib.md5()
+            got, last_rep = 0, 0.0
+            with open(out, "wb") as fp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    fp.write(chunk)
+                    md5.update(chunk)
+                    got += len(chunk)
+                    now = time.time()
+                    if now - last_rep > 2.0:
+                        last_rep = now
+                        report(task, {"code": 4, "id": fid, "cur": got,
+                                      "total": total, "dstname": name})
+            log(f"[mtapc] saved {out.name} ({got}B)")
+            saved.append(out)
+            # md5 verify — the phone shows this as the "checking" step
+            digest = md5.hexdigest()
+            want = fm.get("md5")
+            if want and want != digest:
+                log(f"[mtapc] md5 mismatch {name}: {digest} != {want}")
+            try:
+                post(f"fileverify?user={uid}&task={task}",
+                     {"status": 0, "data": {
+                         "code": 5, "id": fid, "md5": digest,
+                         "dstname": name, "dstpath": str(out)}})
+            except Exception as e5:
+                log(f"[mtapc] fileverify err: {e5}")
+        try:
+            r = json.loads(post(f"taskcomplete?user={uid}&task={task}",
+                                {"status": 0, "data": {}}).read().decode())
+            nxt = (r.get("data") or {}).get("nexttaskid")
+            if nxt:
+                log(f"[mtapc] next task queued: {nxt}")
+                task = str(nxt)
+                continue
+        except Exception as e5:
+            log(f"[mtapc] taskcomplete err: {e5}")
+        break
     return saved
 
 
@@ -297,7 +373,8 @@ class MtaPcReceiver:
         self.log = log
         self._pub = None
         self._watch = None
-        self._seen = set()
+        self._seen = {}  # (task, nonce) -> first-seen timestamp
+        self._last_rx = b""  # dedupe the phone's repeated adverts in the log
         self._busy = threading.Lock()
 
     # ---------------- advertising ----------------
@@ -369,7 +446,10 @@ class MtaPcReceiver:
                 r = DataReader.from_buffer(sec.data)
                 buf = r.read_buffer(r.unconsumed_buffer_length)
                 payload = bytes(buf)
-                if payload and payload[1] == 0x11 and payload[3] == 0x11:
+                if (len(payload) > 4 and payload[1] == 0x11
+                        and payload[3] == 0x11
+                        and payload != self._last_rx):
+                    self._last_rx = payload
                     self.log(f"[mtapc] rx {len(payload)}B {payload.hex()}")
                 offer = parse_offer(payload)
                 if not offer:
@@ -382,9 +462,12 @@ class MtaPcReceiver:
                     self.log("[mtapc] (addressed to a stale devId — "
                              "accepting anyway, single-PC env)")
                 key = (offer["task_id"], offer["nonce"])
+                now = time.time()
+                self._seen = {k: t for k, t in self._seen.items()
+                              if now - t < 120}
                 if key in self._seen:
                     continue
-                self._seen.add(key)
+                self._seen[key] = now
                 self.log(f"[mtapc] OFFER {offer}")
                 threading.Thread(target=self._handle, args=(offer,),
                                  daemon=True).start()
@@ -411,25 +494,37 @@ class MtaPcReceiver:
     def _handle(self, offer: dict):
         if not self._busy.acquire(blocking=False):
             return
+        joined = False
+        home_ssid = None
         try:
             # remember the network we are about to leave so we can come back
-            cur = _netsh("wlan", "show", "interfaces")
-            m = re.search(r"SSID\s*:\s*(.+)", cur)
-            home_ssid = m.group(1).strip() if m else None
+            home_ssid = current_ssid() or None
             # 1) tell the phone we accept (it scans ~30s for this)
             threading.Thread(target=self._respond_thread, args=(offer,),
                              daemon=True).start()
             # 2) join the phone's AP and pull the files over HTTPS
-            ssid = join_phone_ap(offer, self.log)
-            files = pull_files(offer, self.out_dir, self.log)
+            join_phone_ap(offer, self.log)
+            joined = True
+            files = pull_files(offer, self.out_dir, self.log,
+                               user=str(self.dev_id))
             self.log(f"[mtapc] done: {[f.name for f in files]}")
-            # 3) leave the temporary AP
-            if home_ssid and home_ssid != ssid:
-                self.log(f"[mtapc] rejoining {home_ssid}")
-                _netsh("wlan", "connect", f"name={home_ssid}")
         except Exception as e5:
             self.log(f"[mtapc] transfer failed: {e5}")
         finally:
+            # 3) leave the temporary AP / come back home — always, even
+            #    if the transfer blew up halfway
+            if joined or current_ssid().startswith(("ap_mishare", "DIRECT-")):
+                if home_ssid and not home_ssid.startswith(("ap_mishare", "DIRECT-")):
+                    self.log(f"[mtapc] rejoining {home_ssid}")
+                    _netsh("wlan", "connect", f"name={home_ssid}")
+                else:
+                    _netsh("wlan", "disconnect")
+            # drop the throwaway WLAN profile we added for the phone AP
+            sid = offer.get("sender_dev_id")
+            if sid is not None:
+                _netsh("wlan", "delete", "profile",
+                       "name=" + (("DIRECT-%04x" if offer["support2_0"]
+                                   else "ap_mishare_%04x") % sid))
             self._busy.release()
 
 
