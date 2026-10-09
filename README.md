@@ -77,6 +77,15 @@ Zero-install alternative: the hub serves a PWA — open the pair URL in Chrome �
 
 A one-minute Shortcut POSTs shared content to the hub — full guide: [docs/ios-shortcut.md](docs/ios-shortcut.md)
 
+### Xiaomi / HyperOS: native 小米互传
+
+`python -m tandem.mtapc` and this PC **shows up in MiShare's share sheet as a laptop** — no companion app, no Xiaomi hardware required.
+
+- Pick the PC in 互传 → the phone spins up its usual transfer hotspot → Tandem joins, pulls the files over HTTPS, then **hands your Wi-Fi back** — the whole detour takes seconds
+- Wire protocol reverse-engineered from HyperOS: BLE manufacturer-data negotiation → temporary `ap_mishare_*` AP → NanoHTTPD pull
+- ✅ Verified end-to-end: phone → PC on HyperOS 3
+- 🚧 Not yet: PC → phone direction, and the cross-vendor MTA (互传联盟) path — see [Roadmap](#roadmap)
+
 ## How it works
 
 ```
@@ -93,6 +102,8 @@ phone ──(share sheet / PWA / Shortcut)──> hub on your PC ──> other d
 
 ## Roadmap
 
+- [x] Xiaomi MiShare receiver — PC appears natively in 互传's share sheet (phone→PC verified)
+- [ ] MiShare sender — PC → phone over the same protocol
 - [ ] MTA (互传联盟) receiver — PC shows up natively in Xiaomi/OPPO/vivo share menus (BLE channel verified)
 - [ ] Deeper iOS Shortcut integration
 - [ ] PC ↔ PC transfers
