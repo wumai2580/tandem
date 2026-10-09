@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <title>Tandem</title>
+</head>
+<body>
+  <header>
+    <h1><span class="logo">⇄</span> tandem</h1>
+    <div class="status"><span id="dot" class="dot off"></span><span id="status-text">offline</span></div>
+  </header>
+
+  <main>
+    <section id="pair-view" class="card hidden">
+      <h2>Pair this device</h2>
+      <p>Run <code>tandem</code> on your computer and scan the QR code it prints, or paste the pair URL:</p>
+      <div class="row">
+        <input id="pair-input" type="url" placeholder="https://192.168.1.5:9787/?token=…" />
+        <button id="pair-btn">Pair</button>
+      </div>
+      <p class="muted">First visit may show a certificate warning — tap “Advanced → Proceed”. To remove it forever and enable the Android share sheet, <a href="/ca.crt">install the Tandem CA</a> once.</p>
+    </section>
+
+    <section id="app" class="hidden">
+      <div class="card" id="dropzone">
+        <h2>Send</h2>
+        <div class="drop-hint">Drop files here or</div>
+        <button id="pick-btn" class="primary">Choose files</button>
+        <input id="file-input" type="file" multiple hidden />
+        <div class="row" style="margin-top:12px">
+          <input id="text-input" type="text" placeholder="Text, or a link to open on PC" />
+          <button id="send-text">Send</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Clipboard <span class="muted" id="clip-ago"></span></h2>
+        <div id="hub-clip" class="clip-box muted">(empty)</div>
+        <div class="row">
+          <button id="copy-clip">Copy to this device</button>
+          <button id="push-clip">Push my clipboard</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Inbox</h2>
+        <ul id="inbox" class="inbox"></ul>
+        <p id="inbox-empty" class="muted">Nothing received yet.</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="hidden"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
